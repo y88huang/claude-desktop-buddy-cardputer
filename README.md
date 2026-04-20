@@ -1,4 +1,4 @@
-# claude-desktop-buddy-cardputer
+# Claude desktop buddy port for m5stack cardputer
 
 > **Physical desk pet for Claude Code / Cowork** — runs on the **M5Stack Cardputer ADV** (ESP32-S3). Approve permission prompts with `Y`/`N` on a real keyboard, watch your pet react to what Claude is doing, get a Mario 1-UP in your ear when an approval is waiting, and flip the device face-down to make it nap.
 
@@ -10,6 +10,9 @@
 A port of [anthropics/claude-desktop-buddy](https://github.com/anthropics/claude-desktop-buddy) from the M5StickC Plus to the Cardputer ADV. The BLE bridge, stats, NVS persistence, GIF character pipeline, and all 18 original ASCII species work unchanged; this fork adds a landscape UI, full-keyboard input, 8-bit sound library, a live pet picker, two new species (`doge`, `llama`), and a handful of UX fixes.
 
 ## What it does
+<img width="1498" height="958" alt="default screen for claude buddy cardputer in idle mode" src="https://github.com/user-attachments/assets/b4272ba9-3735-48a4-b76d-4af2c46088d2" />
+<img width="1165" height="832" alt="info screen for claude desktop buddy cardputer in idle mode" src="https://github.com/user-attachments/assets/1af36f57-5696-4fb3-aaa4-f749ca196f30" />
+<img width="1469" height="976" alt="pet screen for claude desktop buddy cardputer" src="https://github.com/user-attachments/assets/2de63c37-2c55-45ba-9c60-28c0c9b29619" />
 
 The device connects to the Claude desktop apps over BLE (developer mode required) and acts as a physical session dashboard + permission-approval affordance:
 
