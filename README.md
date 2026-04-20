@@ -6,6 +6,18 @@ The upstream firmware targets the M5StickC Plus — portrait 135×240 display, A
 
 > **Building your own device?** You still don't need any of the code here — the wire protocol reference in **[REFERENCE.md](REFERENCE.md)** is untouched from upstream.
 
+## What it does
+
+The device connects to the Claude desktop apps over BLE (developer mode required) and acts as a physical session dashboard + permission-approval affordance:
+
+- **Permission prompts** — when Claude asks to run a command, the device plays a Mario 1-UP jingle, pulses the RGB LED red-orange, and shows the tool name. Press `Y` to approve, `N` to deny. Approving in under 5 seconds triggers a heart animation.
+- **Live transcript** — the last three wrapped lines from Claude scroll at the bottom of the home screen.
+- **Seven pet moods** — sleep, idle, busy (3+ sessions running), attention (approval pending), celebrate (session just completed), dizzy (you shook it), heart (fast approval).
+- **20 ASCII species + custom GIFs** — cycle with the live picker (Menu → pet) or drag a character pack folder onto the Hardware Buddy window to stream a custom GIF character over BLE.
+- **Tamagotchi mechanics** — the pet has mood, fed, energy, and level stats that drift based on your approval cadence and Claude's token usage. Flip the device face-down and it naps (screen dims, energy refills). Shake it to make it dizzy.
+- **Compact clock face** — `HH:MM:SS Mon DD` appears across the top when idle on USB power, with the pet still rendering underneath.
+- **Stats page** — press `Enter` to cycle to PET mode for mood hearts, fed bar, energy bar, level badge, and lifetime counters (approvals, denials, nap hours, tokens, tokens today).
+
 ## What changed from upstream
 
 - **HAL shim** ([`src/hal.h`](src/hal.h) + [`src/hal.cpp`](src/hal.cpp)) — wraps every `M5.Axp` / `M5.Beep` / `M5.BtnA` / `M5.BtnB` / `M5.Imu` / `M5.Rtc` call site so both boards build from the same source tree. `platformio.ini` has two envs: `m5stickc-plus` (unchanged upstream build) and `cardputer-adv`.
