@@ -1,4 +1,4 @@
-#include <M5StickCPlus.h>
+#include "hal.h"
 #include <LittleFS.h>
 #include <stdarg.h>
 #include "ble_bridge.h"
@@ -20,10 +20,28 @@ static void startBt() {
 
 #include "character.h"
 #include "stats.h"
+#ifdef CARDPUTER_ADV
+// Cardputer's 1.14" TFT is 240x135 native landscape. UI runs at rotation 1
+// so the keyboard is on the bottom; every coord in this file that
+// references H (e.g. clock baselines, modal centering, nap dim) now
+// assumes the smaller vertical axis.
+const int W = 240, H = 135;
+const int CX = W / 2;
+const int CY_BASE = H / 2;
+constexpr uint8_t HOME_ROTATION = 1;   // landscape — keyboard on bottom edge
+// Info and pet pages both hide the pet on landscape and claim the full
+// canvas from y=4 — H=135 is too tight to split the screen between a
+// peek-pet strip and a content panel. The pet lives on the home screen.
+constexpr int PET_PANEL_TOP  = 4;
+constexpr int INFO_PANEL_TOP = 4;
+#else
 const int W = 135, H = 240;
 const int CX = W / 2;
 const int CY_BASE = 120;
-const int LED_PIN = 10;          // red LED, active-low
+constexpr uint8_t HOME_ROTATION = 0;   // portrait — StickC held upright
+constexpr int PET_PANEL_TOP  = 70;
+constexpr int INFO_PANEL_TOP = 70;
+#endif
 
 // Colors used across multiple UI surfaces
 const uint16_t HOT   = 0xFA20;   // red-orange: warnings, impatience, deny
@@ -80,8 +98,31 @@ static void nextPet() {
   characterInvalidate();
   if (buddyMode) buddyInvalidate();
 }
+
+// Reverse of nextPet(). Used by the picker's Left arrow so the user can
+// back out of a species they've accidentally jumped past instead of
+// wrapping through all ~19 to get back.
+static void prevPet() {
+  uint8_t n = buddySpeciesCount();
+  if (!buddyMode) {                          // GIF → last species
+    buddyMode = true;
+    uint8_t last = n ? n - 1 : 0;
+    buddySetSpeciesIdx(last);
+    speciesIdxSave(last);
+  } else if (buddySpeciesIdx() == 0 && gifAvailable) {      // first species → GIF
+    buddyMode = false;
+    speciesIdxSave(SPECIES_GIF);
+  } else {
+    uint8_t idx = buddySpeciesIdx();
+    uint8_t prev = (idx == 0) ? (n ? n - 1 : 0) : idx - 1;
+    buddySetSpeciesIdx(prev);
+    speciesIdxSave(prev);
+  }
+  characterInvalidate();
+  if (buddyMode) buddyInvalidate();
+}
 uint32_t wakeTransitionUntil = 0;
-const uint32_t SCREEN_OFF_MS = 30000;
+const uint32_t SCREEN_OFF_MS = 120000;
 
 bool     napping = false;
 uint32_t napStartMs = 0;
@@ -90,16 +131,16 @@ uint32_t promptArrivedMs = 0;
 // Face-down = Z-axis dominant and negative. Debounced so a toss doesn't count.
 static bool isFaceDown() {
   float ax, ay, az;
-  M5.Imu.getAccelData(&ax, &ay, &az);
+  halGetAccel(&ax, &ay, &az);
   return az < -0.7f && fabsf(ax) < 0.4f && fabsf(ay) < 0.4f;
 }
 
-static void applyBrightness() { M5.Axp.ScreenBreath(20 + brightLevel * 20); }
+static void applyBrightness() { halBrightness(20 + brightLevel * 20); }
 
 static void wake() {
   lastInteractMs = millis();
   if (screenOff) {
-    M5.Axp.SetLDO2(true);
+    halScreenPower(true);
     applyBrightness();
     screenOff = false;
     wakeTransitionUntil = millis() + 12000;
@@ -108,9 +149,53 @@ static void wake() {
 }
 bool     responseSent = false;
 
-static void beep(uint16_t freq, uint16_t dur) {
-  if (settings().sound) M5.Beep.tone(freq, dur);
+// -------------------------------------------------------------------------
+// 8-bit SFX library. Each sound is a short note sequence tuned to C-major
+// pentatonic so rapid keystrokes don't sound dissonant. Notes are stored
+// as (freq, dur_ms) pairs in parallel const tables; sfxXxx() wrappers
+// hand them to halBeepSeq which steps through them in the background.
+// Earlier calls are pre-empted — the newest key press always gets a
+// fresh sound rather than queueing behind stale ones.
+// -------------------------------------------------------------------------
+static const uint16_t SFX_NAV_F[]      = { 1760 };                        // A6
+static const uint16_t SFX_NAV_D[]      = {   22 };
+static const uint16_t SFX_CONFIRM_F[]  = { 1318, 1976 };                  // E6, B6
+static const uint16_t SFX_CONFIRM_D[]  = {   35,   55 };
+static const uint16_t SFX_BACK_F[]     = { 1568, 1047 };                  // G6, C6
+static const uint16_t SFX_BACK_D[]     = {   35,   65 };
+static const uint16_t SFX_APPROVE_F[]  = { 1047, 1318, 1568, 2093 };      // C E G C  (Zelda-lite)
+static const uint16_t SFX_APPROVE_D[]  = {   40,   40,   40,   90 };
+static const uint16_t SFX_DENY_F[]     = { 880, 698, 523 };               // A5, F5, C5
+static const uint16_t SFX_DENY_D[]     = {  45,  45,  90 };
+static const uint16_t SFX_SAVE_F[]     = { 1568, 1976, 2349 };            // G6, B6, D7
+static const uint16_t SFX_SAVE_D[]     = {   45,   45,   90 };
+// Mario 1-UP jingle — the most "come look at me" chiptune in existence.
+// E5, G5, E6, C6, D6, G6 at ~35ms/note (80ms on the tail) is roughly the
+// NES tempo; any slower and it stops sounding like Mario.
+static const uint16_t SFX_ALERT_F[]    = { 659, 784, 1319, 1047, 1175, 1568 };
+static const uint16_t SFX_ALERT_D[]    = {  35,  35,   35,   35,   35,   90 };
+static const uint16_t SFX_MENU_F[]     = { 784, 1047 };                   // G5, C6
+static const uint16_t SFX_MENU_D[]     = {  55,   75 };
+static const uint16_t SFX_WARN_F[]     = { 330 };                         // E4 low buzz
+static const uint16_t SFX_WARN_D[]     = { 140 };
+static const uint16_t SFX_WARN2_F[]    = { 220, 165 };                    // A3, E3 — heavier
+static const uint16_t SFX_WARN2_D[]    = {  90, 180 };
+
+static void sfxPlay(const uint16_t* f, const uint16_t* d, uint8_t n) {
+  if (settings().sound) halBeepSeq(f, d, n);
 }
+#define SFX_N(arr) (uint8_t)(sizeof(arr) / sizeof((arr)[0]))
+static void sfxNav()     { sfxPlay(SFX_NAV_F,     SFX_NAV_D,     SFX_N(SFX_NAV_F));     }
+static void sfxConfirm() { sfxPlay(SFX_CONFIRM_F, SFX_CONFIRM_D, SFX_N(SFX_CONFIRM_F)); }
+static void sfxBack()    { sfxPlay(SFX_BACK_F,    SFX_BACK_D,    SFX_N(SFX_BACK_F));    }
+static void sfxApprove() { sfxPlay(SFX_APPROVE_F, SFX_APPROVE_D, SFX_N(SFX_APPROVE_F)); }
+static void sfxDeny()    { sfxPlay(SFX_DENY_F,    SFX_DENY_D,    SFX_N(SFX_DENY_F));    }
+static void sfxSave()    { sfxPlay(SFX_SAVE_F,    SFX_SAVE_D,    SFX_N(SFX_SAVE_F));    }
+static void sfxAlert()   { sfxPlay(SFX_ALERT_F,   SFX_ALERT_D,   SFX_N(SFX_ALERT_F));   }
+static void sfxMenu()    { sfxPlay(SFX_MENU_F,    SFX_MENU_D,    SFX_N(SFX_MENU_F));    }
+static void sfxWarn()    { sfxPlay(SFX_WARN_F,    SFX_WARN_D,    SFX_N(SFX_WARN_F));    }
+static void sfxWarn2()   { sfxPlay(SFX_WARN2_F,   SFX_WARN2_D,   SFX_N(SFX_WARN2_F));   }
+#undef SFX_N
 
 static void sendCmd(const char* json) {
   Serial.println(json);
@@ -134,8 +219,11 @@ void applyDisplayMode() {
   characterInvalidate();  // redraws character on next tick (text mode path)
 }
 
-const char* menuItems[] = { "settings", "turn off", "help", "about", "demo", "close" };
-const uint8_t MENU_N = 6;
+// "pet" at index 1 cycles the active species inline (like "demo" toggles);
+// menuConfirm() keeps the menu open for this item so the user can mash it
+// to flip through all ~19 species without reopening the menu each time.
+const char* menuItems[] = { "settings", "pet", "turn off", "help", "about", "demo", "close" };
+const uint8_t MENU_N = 7;
 
 bool    settingsOpen = false;
 uint8_t settingsSel  = 0;
@@ -144,6 +232,11 @@ const uint8_t SETTINGS_N = 10;
 
 bool    resetOpen = false;
 uint8_t resetSel  = 0;
+
+// Full-screen pet preview with a bottom hint bar. Opened from the "pet"
+// item in the main menu; while open, Left/Right step species and the HUD
+// is suppressed so the pet has the canvas.
+bool    petPickerOpen = false;
 const char* resetItems[] = { "delete char", "factory reset", "back" };
 const uint8_t RESET_N = 3;
 static uint32_t resetConfirmUntil = 0;
@@ -186,11 +279,11 @@ static void applyReset(uint8_t idx) {
   if (!armed) {
     resetConfirmIdx = idx;
     resetConfirmUntil = now + 3000;
-    beep(1400, 60);
+    sfxWarn();
     return;
   }
 
-  beep(800, 200);
+  sfxWarn2();
   if (idx == 0) {
     // delete char: wipe /characters/, reboot into ASCII mode
     File d = LittleFS.open("/characters");
@@ -250,7 +343,19 @@ static void drawMenuHints(const Palette& p, int mx, int mw, int hy,
 
 static void drawSettings() {
   const Palette& p = characterPalette();
-  int mw = 118, mh = 16 + SETTINGS_N * 14 + MENU_HINT_H;
+  // Settings is the tallest modal — 10 rows. On landscape 135 we can't
+  // afford 14px pitch (170 tall); drop to 10px pitch and a compact chrome
+  // so the modal fits with a few pixels of margin.
+#ifdef CARDPUTER_ADV
+  const int PITCH = 10;
+  const int PAD_TOP = 6;
+  const int TEXT_OFFSET = 3;       // y inside the row for text baseline
+#else
+  const int PITCH = 14;
+  const int PAD_TOP = 16;
+  const int TEXT_OFFSET = 8;
+#endif
+  int mw = 118, mh = PAD_TOP + SETTINGS_N * PITCH + MENU_HINT_H;
   int mx = (W - mw) / 2, my = (H - mh) / 2;
   spr.fillRoundRect(mx, my, mw, mh, 4, PANEL);
   spr.drawRoundRect(mx, my, mw, mh, 4, p.textDim);
@@ -259,11 +364,12 @@ static void drawSettings() {
   bool vals[] = { s.sound, s.bt, s.wifi, s.led, s.hud };
   for (int i = 0; i < SETTINGS_N; i++) {
     bool sel = (i == settingsSel);
+    int rowY = my + TEXT_OFFSET + i * PITCH;
     spr.setTextColor(sel ? p.text : p.textDim, PANEL);
-    spr.setCursor(mx + 6, my + 8 + i * 14);
+    spr.setCursor(mx + 6, rowY);
     spr.print(sel ? "> " : "  ");
     spr.print(settingsItems[i]);
-    spr.setCursor(mx + mw - 36, my + 8 + i * 14);
+    spr.setCursor(mx + mw - 36, rowY);
     spr.setTextColor(p.textDim, PANEL);
     if (i == 0) {
       spr.printf("%u/4", brightLevel);
@@ -280,6 +386,37 @@ static void drawSettings() {
     }
   }
   drawMenuHints(p, mx, mw, my + mh - 12, "Next", "Change");
+}
+
+// Bottom 24 px hint bar shown while petPickerOpen. Leaves the rest of the
+// sprite for the character/buddy tick, so the selection updates live as
+// the user steps through species.
+static void drawPetPicker() {
+  const Palette& p = characterPalette();
+  const int BAR_H = 24;
+  const int y0 = H - BAR_H;
+  spr.fillRect(0, y0, W, BAR_H, p.bg);
+  spr.drawFastHLine(0, y0, W, p.textDim);
+
+  uint8_t total = buddySpeciesCount() + (gifAvailable ? 1 : 0);
+  uint8_t pos   = buddyMode ? buddySpeciesIdx() + 1 : total;
+
+  char label[32];
+  if (buddyMode) snprintf(label, sizeof(label), "%s  %u/%u",
+                          buddySpeciesName(), pos, total);
+  else           snprintf(label, sizeof(label), "GIF  %u/%u", pos, total);
+
+  spr.setTextSize(1);
+  spr.setTextDatum(MC_DATUM);
+  spr.setTextColor(p.text, p.bg);
+  spr.drawString(label, CX, y0 + 6);
+  spr.setTextColor(p.textDim, p.bg);
+#ifdef CARDPUTER_ADV
+  spr.drawString(",  /   swap     Enter done", CX, y0 + 16);
+#else
+  spr.drawString("A: swap   B: done", CX, y0 + 16);
+#endif
+  spr.setTextDatum(TL_DATUM);
 }
 
 static void drawReset() {
@@ -305,17 +442,27 @@ static void drawReset() {
 void menuConfirm() {
   switch (menuSel) {
     case 0: settingsOpen = true; menuOpen = false; settingsSel = 0; break;
-    case 1: M5.Axp.PowerOff(); break;
-    case 2:
+    case 1:
+      // Enter the live pet picker: close the menu, force home display so
+      // the pet renders at full size, and let Left/Right step species
+      // without the menu covering the preview.
+      menuOpen = false;
+      displayMode = DISP_NORMAL;
+      applyDisplayMode();
+      petPickerOpen = true;
+      characterInvalidate();
+      break;
+    case 2: halPowerOff(); break;
     case 3:
+    case 4:
       menuOpen = false;
       displayMode = DISP_INFO;
-      infoPage = (menuSel == 2) ? INFO_PG_BUTTONS : INFO_PG_CREDITS;
+      infoPage = (menuSel == 3) ? INFO_PG_BUTTONS : INFO_PG_CREDITS;
       applyDisplayMode();
       characterInvalidate();
       break;
-    case 4: dataSetDemo(!dataDemo()); break;
-    case 5: menuOpen = false; characterInvalidate(); break;
+    case 5: dataSetDemo(!dataDemo()); break;
+    case 6: menuOpen = false; characterInvalidate(); break;
   }
 }
 
@@ -332,7 +479,7 @@ void drawMenu() {
     spr.setCursor(mx + 6, my + 8 + i * 14);
     spr.print(sel ? "> " : "  ");
     spr.print(menuItems[i]);
-    if (i == 4) spr.print(dataDemo() ? "  on" : "  off");
+    if (i == 5) spr.print(dataDemo() ? "  on" : "  off");
   }
   drawMenuHints(p, mx, mw, my + mh - 12);
 }
@@ -356,14 +503,20 @@ static bool            _onUsb       = false;
 static void clockRefreshRtc() {
   if (millis() - _clkLastRead < 1000) return;
   _clkLastRead = millis();
-  _onUsb = M5.Axp.GetVBusVoltage() > 4.0f;
-  M5.Rtc.GetTime(&_clkTm);
-  M5.Rtc.GetDate(&_clkDt);
+  _onUsb = halVbusVolts() > 4.0f;
+  halRtcGetTime(&_clkTm);
+  halRtcGetDate(&_clkDt);
 }
 
 static void clockUpdateOrient() {
+#ifdef CARDPUTER_ADV
+  // Cardputer's home rotation is already landscape, so the tilt-to-rotate
+  // clock path is redundant. Stay at the sprite-drawn clock face.
+  clockOrient = 0;
+  return;
+#endif
   float ax, ay, az;
-  M5.Imu.getAccelData(&ax, &ay, &az);
+  halGetAccel(&ax, &ay, &az);
   uint8_t lock = settings().clockRot;
   if (lock == 1) { clockOrient = 0; return; }
   if (lock == 2) {
@@ -418,14 +571,28 @@ static void drawClock() {
 
   if (clockOrient == 0) {
     paintedOrient = 0;
-    // Bottom half — buddy naturally lives at y=0..82, GIF peeks at top
-    // via peek mode. Clearing from 90 leaves both untouched.
+#ifdef CARDPUTER_ADV
+    // Compact top-strip clock at size 1 (6x8 glyphs) in a 10px band so
+    // the pet keeps ~125px underneath instead of competing for the
+    // vertical space a size-2 clock ate.
+    spr.fillRect(0, 0, W, 10, p.bg);
+    char line[24];
+    snprintf(line, sizeof(line), "%s%s  %s", hm, ss, dl);
+    spr.setTextDatum(MC_DATUM);
+    spr.setTextSize(1); spr.setTextColor(p.text, p.bg);
+    spr.drawString(line, CX, 5);
+    spr.setTextDatum(TL_DATUM);
+#else
+    // 135x240 portrait. Bottom half — buddy naturally lives at y=0..82,
+    // GIF peeks at top via peek mode. Clearing from 90 leaves both
+    // untouched.
     spr.fillRect(0, 90, W, H - 90, p.bg);
     spr.setTextDatum(MC_DATUM);
     spr.setTextSize(4); spr.setTextColor(p.text, p.bg);    spr.drawString(hm, CX, 140);
     spr.setTextSize(2); spr.setTextColor(p.textDim, p.bg); spr.drawString(ss, CX, 175);
     spr.setTextSize(1);                                     spr.drawString(dl, CX, 200);
     spr.setTextDatum(TL_DATUM);
+#endif
     return;
   }
 
@@ -473,7 +640,7 @@ static void drawClock() {
       characterRenderTo(&M5.Lcd, 57, 45);
     }
   }
-  M5.Lcd.setRotation(0);
+  M5.Lcd.setRotation(HOME_ROTATION);
 }
 
 PersonaState derive(const TamaState& s) {
@@ -491,7 +658,7 @@ void triggerOneShot(PersonaState s, uint32_t durMs) {
 
 bool checkShake() {
   float ax, ay, az;
-  M5.Imu.getAccelData(&ax, &ay, &az);
+  halGetAccel(&ax, &ay, &az);
   float mag = sqrtf(ax*ax + ay*ay + az*az);
   float delta = fabsf(mag - accelBaseline);
   accelBaseline = accelBaseline * 0.95f + mag * 0.05f;
@@ -531,8 +698,15 @@ void drawPasskey() {
 
 void drawInfo() {
   const Palette& p = characterPalette();
-  const int TOP = 70;
+  const int TOP = INFO_PANEL_TOP;
+  // Full-sprite wipe on Cardputer: the main loop skips character/buddy
+  // rendering in INFO mode, so this is where the old pixels get cleared.
+  // StickC keeps the partial wipe so the portrait pet peeks above y=70.
+#ifdef CARDPUTER_ADV
+  spr.fillSprite(p.bg);
+#else
   spr.fillRect(0, TOP, W, H - TOP, p.bg);
+#endif
   spr.setTextSize(1);
   int y = TOP + 2;
   auto ln = [&](const char* fmt, ...) {
@@ -543,6 +717,20 @@ void drawInfo() {
   if (infoPage == 0) {
     _infoHeader(p, y, "ABOUT", infoPage);
     spr.setTextColor(p.textDim, p.bg);
+#ifdef CARDPUTER_ADV
+    ln("I watch your Claude desktop");
+    ln("sessions. I sleep when nothing's");
+    ln("happening, wake when you start");
+    ln("working, get impatient when");
+    ln("approvals pile up.");
+    y += 6;
+    spr.setTextColor(p.text, p.bg);
+    ln("Y = approve, N = deny");
+    ln("on a pending prompt.");
+    y += 6;
+    spr.setTextColor(p.textDim, p.bg);
+    ln("18 species. Menu > pet to cycle.");
+#else
     ln("I watch your Claude");
     ln("desktop sessions.");
     y += 6;
@@ -559,9 +747,25 @@ void drawInfo() {
     spr.setTextColor(p.textDim, p.bg);
     ln("18 species. Settings");
     ln("> ascii pet to cycle.");
+#endif
 
   } else if (infoPage == 1) {
+#ifdef CARDPUTER_ADV
+    _infoHeader(p, y, "KEYBOARD", infoPage);
+#else
     _infoHeader(p, y, "BUTTONS", infoPage);
+#endif
+#ifdef CARDPUTER_ADV
+    spr.setTextColor(p.text, p.bg);    ln("Enter  confirm / select");
+    spr.setTextColor(p.textDim, p.bg); ln("`/Del  close modal (Esc)"); y += 4;
+    spr.setTextColor(p.text, p.bg);    ln(";  .   up / down");
+    spr.setTextColor(p.textDim, p.bg); ln(",  /   previous / next page"); y += 4;
+    spr.setTextColor(p.text, p.bg);    ln("Y  N   approve / deny");
+    spr.setTextColor(p.textDim, p.bg); ln("       on a pending prompt"); y += 4;
+    spr.setTextColor(p.text, p.bg);    ln("M      open menu");
+    spr.setTextColor(p.textDim, p.bg); ln("G      toggle demo mode"); y += 4;
+    spr.setTextColor(p.textDim, p.bg); ln("Power: slide switch on side");
+#else
     spr.setTextColor(p.text, p.bg);    ln("A   front");
     spr.setTextColor(p.textDim, p.bg); ln("    next screen");
     ln("    approve prompt"); y += 4;
@@ -573,6 +777,7 @@ void drawInfo() {
     spr.setTextColor(p.text, p.bg);    ln("Power  left side");
     spr.setTextColor(p.textDim, p.bg); ln("    tap = screen off");
     ln("    hold 6s = off");
+#endif
 
   } else if (infoPage == 2) {
     _infoHeader(p, y, "CLAUDE", infoPage);
@@ -593,9 +798,9 @@ void drawInfo() {
   } else if (infoPage == 3) {
     _infoHeader(p, y, "DEVICE", infoPage);
 
-    int vBat_mV = (int)(M5.Axp.GetBatVoltage() * 1000);
-    int iBat_mA = (int)M5.Axp.GetBatCurrent();
-    int vBus_mV = (int)(M5.Axp.GetVBusVoltage() * 1000);
+    int vBat_mV = (int)(halBatteryVolts() * 1000);
+    int iBat_mA = (int)halBatteryMilliAmps();
+    int vBus_mV = (int)(halVbusVolts() * 1000);
     int pct = (vBat_mV - 3200) / 10;   // (v-3.2)/(4.2-3.2)*100 = (v-3.2)*100 = (mv-3200)/10
     if (pct < 0) pct = 0; if (pct > 100) pct = 100;
     bool usb = vBus_mV > 4000;
@@ -627,7 +832,7 @@ void drawInfo() {
     ln("  heap     %uKB", ESP.getFreeHeap() / 1024);
     ln("  bright   %u/4", brightLevel);
     ln("  bt       %s", settings().bt ? (dataBtActive() ? "linked" : "on") : "off");
-    ln("  temp     %dC", (int)M5.Axp.GetTempInAXP192());
+    ln("  temp     %dC", halTempC());
 
   } else if (infoPage == 4) {
     _infoHeader(p, y, "BLUETOOTH", infoPage);
@@ -682,8 +887,13 @@ void drawInfo() {
     spr.setTextColor(p.textDim, p.bg);
     ln("hardware");
     y += 4;
+#ifdef CARDPUTER_ADV
+    ln("M5 Cardputer ADV");
+    ln("ESP32-S3");
+#else
     ln("M5StickC Plus");
     ln("ESP32 + AXP192");
+#endif
   }
 }
 
@@ -781,34 +991,88 @@ static void tinyHeart(int x, int y, bool filled, uint16_t col) {
 }
 
 static void drawPetStats(const Palette& p) {
-  const int TOP = 70;
+  const int TOP = PET_PANEL_TOP;
+#ifdef CARDPUTER_ADV
+  spr.fillSprite(p.bg);   // full-screen stats; kill any pet pixels above
+#else
   spr.fillRect(0, TOP, W, H - TOP, p.bg);
+#endif
   spr.setTextSize(1);
-  int y = TOP + 16;
 
+  auto tokFmt = [&](const char* label, uint32_t v, int xPx, int yPx) {
+    spr.setCursor(xPx, yPx);
+    if (v >= 1000000)   spr.printf("%s%lu.%luM", label, v/1000000, (v/100000)%10);
+    else if (v >= 1000) spr.printf("%s%lu.%luK", label, v/1000, (v/100)%10);
+    else                spr.printf("%s%lu", label, v);
+  };
+
+  uint8_t  mood    = statsMoodTier();
+  uint16_t moodCol = (mood >= 3) ? RED : (mood >= 2) ? HOT : p.textDim;
+  uint8_t  fed     = statsFedProgress();
+  uint8_t  en      = statsEnergyTier();
+  uint16_t enCol   = (en >= 4) ? 0x07FF : (en >= 2) ? 0xFFE0 : HOT;
+  uint32_t nap     = stats().napSeconds;
+
+#ifdef CARDPUTER_ADV
+  // 240x135 landscape: widgets on the left 130 px, counters on the right.
+  // Pitch tightened from 20/24 to 16/18 so the level badge ends cleanly
+  // inside H=135 instead of spilling off the bottom.
+  int y = TOP + 14;
   spr.setTextColor(p.textDim, p.bg);
   spr.setCursor(6, y - 2); spr.print("mood");
-  uint8_t mood = statsMoodTier();
-  uint16_t moodCol = (mood >= 3) ? RED : (mood >= 2) ? HOT : p.textDim;
+  for (int i = 0; i < 4; i++) tinyHeart(54 + i * 16, y + 2, i < mood, moodCol);
+
+  y += 16;
+  spr.setCursor(6, y - 2); spr.print("fed");
+  for (int i = 0; i < 10; i++) {
+    int px = 38 + i * 9;
+    if (i < fed) spr.fillCircle(px, y + 1, 2, p.body);
+    else         spr.drawCircle(px, y + 1, 2, p.textDim);
+  }
+
+  y += 16;
+  spr.setCursor(6, y - 2); spr.print("energy");
+  for (int i = 0; i < 5; i++) {
+    int px = 54 + i * 13;
+    if (i < en) spr.fillRect(px, y - 2, 9, 6, enCol);
+    else        spr.drawRect(px, y - 2, 9, 6, p.textDim);
+  }
+
+  y += 18;
+  spr.fillRoundRect(6, y - 2, 42, 14, 3, p.body);
+  spr.setTextColor(p.bg, p.body);
+  spr.setCursor(11, y + 1); spr.printf("Lv %u", stats().level);
+
+  // Right column: labels abbreviated so each row fits in ~95 px at size 1.
+  const int RX = 140;
+  int yr = TOP + 12;
+  spr.setTextColor(p.textDim, p.bg);
+  spr.setCursor(RX, yr);      spr.printf("appr   %u", stats().approvals);
+  spr.setCursor(RX, yr + 10); spr.printf("deny   %u", stats().denials);
+  spr.setCursor(RX, yr + 20); spr.printf("nap    %luh%02lum", nap / 3600, (nap / 60) % 60);
+  tokFmt("tokens ", stats().tokens,     RX, yr + 30);
+  tokFmt("today  ", tama.tokensToday,   RX, yr + 40);
+#else
+  // Original 135x240 portrait — widgets stacked with counts below.
+  int y = TOP + 16;
+  spr.setTextColor(p.textDim, p.bg);
+  spr.setCursor(6, y - 2); spr.print("mood");
   for (int i = 0; i < 4; i++) tinyHeart(54 + i * 16, y + 2, i < mood, moodCol);
 
   y += 20;
   spr.setCursor(6, y - 2); spr.print("fed");
-  uint8_t fed = statsFedProgress();
   for (int i = 0; i < 10; i++) {
     int px = 38 + i * 9;
     if (i < fed) spr.fillCircle(px, y + 1, 2, p.body);
-    else spr.drawCircle(px, y + 1, 2, p.textDim);
+    else         spr.drawCircle(px, y + 1, 2, p.textDim);
   }
 
   y += 20;
   spr.setCursor(6, y - 2); spr.print("energy");
-  uint8_t en = statsEnergyTier();
-  uint16_t enCol = (en >= 4) ? 0x07FF : (en >= 2) ? 0xFFE0 : HOT;
   for (int i = 0; i < 5; i++) {
     int px = 54 + i * 13;
     if (i < en) spr.fillRect(px, y - 2, 9, 6, enCol);
-    else spr.drawRect(px, y - 2, 9, 6, p.textDim);
+    else        spr.drawRect(px, y - 2, 9, 6, p.textDim);
   }
 
   y += 24;
@@ -818,27 +1082,53 @@ static void drawPetStats(const Palette& p) {
 
   y += 20;
   spr.setTextColor(p.textDim, p.bg);
-  spr.setCursor(6, y);
-  spr.printf("approved %u", stats().approvals);
-  spr.setCursor(6, y + 10);
-  spr.printf("denied   %u", stats().denials);
-  uint32_t nap = stats().napSeconds;
-  spr.setCursor(6, y + 20);
-  spr.printf("napped   %luh%02lum", nap/3600, (nap/60)%60);
-  auto tokFmt = [&](const char* label, uint32_t v, int yPx) {
-    spr.setCursor(6, yPx);
-    if (v >= 1000000)   spr.printf("%s%lu.%luM", label, v/1000000, (v/100000)%10);
-    else if (v >= 1000) spr.printf("%s%lu.%luK", label, v/1000, (v/100)%10);
-    else                spr.printf("%s%lu", label, v);
-  };
-  tokFmt("tokens   ", stats().tokens, y + 30);
-  tokFmt("today    ", tama.tokensToday, y + 40);
+  spr.setCursor(6, y);      spr.printf("approved %u", stats().approvals);
+  spr.setCursor(6, y + 10); spr.printf("denied   %u", stats().denials);
+  spr.setCursor(6, y + 20); spr.printf("napped   %luh%02lum", nap / 3600, (nap / 60) % 60);
+  tokFmt("tokens   ", stats().tokens,   6, y + 30);
+  tokFmt("today    ", tama.tokensToday, 6, y + 40);
+#endif
 }
 
 static void drawPetHowTo(const Palette& p) {
-  const int TOP = 70;
+  const int TOP = PET_PANEL_TOP;
+#ifdef CARDPUTER_ADV
+  spr.fillSprite(p.bg);
+#else
   spr.fillRect(0, TOP, W, H - TOP, p.bg);
+#endif
   spr.setTextSize(1);
+
+#ifdef CARDPUTER_ADV
+  // Two-column landscape layout — MOOD + FED on the left, ENERGY + idle
+  // behavior + keybinds on the right. Both columns start under the PET
+  // header drawn by drawPet().
+  int yL = TOP + 14;
+  auto lnL = [&](uint16_t c, const char* s) {
+    spr.setTextColor(c, p.bg); spr.setCursor(6, yL); spr.print(s); yL += 9;
+  };
+  auto gapL = [&]() { yL += 4; };
+  lnL(p.body,    "MOOD");
+  lnL(p.textDim, " approve fast = up");
+  lnL(p.textDim, " deny lots = down"); gapL();
+  lnL(p.body,    "FED");
+  lnL(p.textDim, " 50K tokens =");
+  lnL(p.textDim, " level up + confetti");
+
+  const int RX = 130;
+  int yR = TOP + 14;
+  auto lnR = [&](uint16_t c, const char* s) {
+    spr.setTextColor(c, p.bg); spr.setCursor(RX, yR); spr.print(s); yR += 9;
+  };
+  auto gapR = [&]() { yR += 4; };
+  lnR(p.body,    "ENERGY");
+  lnR(p.textDim, " face-down to nap");
+  lnR(p.textDim, " refills to full");  gapR();
+  lnR(p.textDim, "idle 2m = off");
+  lnR(p.textDim, "any key = wake");    gapR();
+  lnR(p.textDim, "Y: approve  N: deny");
+  lnR(p.textDim, "M: menu   ;./,//: nav");
+#else
   int y = TOP + 2;
   auto ln = [&](uint16_t c, const char* s) {
     spr.setTextColor(c, p.bg); spr.setCursor(6, y); spr.print(s); y += 9;
@@ -859,16 +1149,17 @@ static void drawPetHowTo(const Palette& p) {
   ln(p.textDim, " face-down to nap");
   ln(p.textDim, " refills to full"); gap();
 
-  ln(p.textDim, "idle 30s = off");
+  ln(p.textDim, "idle 2m = off");
   ln(p.textDim, "any button = wake"); gap();
 
   ln(p.textDim, "A: screens  B: page");
   ln(p.textDim, "hold A: menu");
+#endif
 }
 
 void drawPet() {
   const Palette& p = characterPalette();
-  int y = 70;
+  int y = PET_PANEL_TOP;
 
   if (petPage == 0) drawPetStats(p);
   else drawPetHowTo(p);
@@ -892,6 +1183,14 @@ void drawHUD() {
   const Palette& p = characterPalette();
   const int SHOW = 3, LH = 8, WIDTH = 21;
   const int AREA = SHOW * LH + 4;
+  // 21-char wrap × 6px per size-1 glyph = 126 px block. Portrait (135 wide)
+  // pads left at x=4; landscape (240 wide) block-centers so the strip
+  // sits under the pet instead of crammed into the bottom-left corner.
+#ifdef CARDPUTER_ADV
+  const int HUD_X = (W - WIDTH * 6) / 2;
+#else
+  const int HUD_X = 4;
+#endif
   spr.fillRect(0, H - AREA, W, AREA, p.bg);
   spr.setTextSize(1);
 
@@ -899,8 +1198,15 @@ void drawHUD() {
 
   if (tama.nLines == 0) {
     spr.setTextColor(p.text, p.bg);
+#ifdef CARDPUTER_ADV
+    // Single-line fallback — center on the actual string length.
+    spr.setTextDatum(MC_DATUM);
+    spr.drawString(tama.msg, CX, H - LH / 2 - 2);
+    spr.setTextDatum(TL_DATUM);
+#else
     spr.setCursor(4, H - LH - 2);
     spr.print(tama.msg);
+#endif
     return;
   }
 
@@ -925,7 +1231,7 @@ void drawHUD() {
     uint8_t row = start + i;
     bool fresh = (srcOf[row] == newest) && (msgScroll == 0);
     spr.setTextColor(fresh ? p.text : p.textDim, p.bg);
-    spr.setCursor(4, H - AREA + 2 + i * LH);
+    spr.setCursor(HUD_X, H - AREA + 2 + i * LH);
     spr.print(disp[row]);
   }
   if (msgScroll > 0) {
@@ -936,13 +1242,12 @@ void drawHUD() {
 }
 
 void setup() {
-  M5.begin();
-  M5.Lcd.setRotation(0);
-  M5.Imu.Init();
-  M5.Beep.begin();
+  halInit();
+  M5.Lcd.setRotation(HOME_ROTATION);
+  halImuInit();
+  halBeepInit();
   startBt();
-  pinMode(LED_PIN, OUTPUT);
-  digitalWrite(LED_PIN, HIGH);   // off
+  halLedSet(0, 0, 0);   // make sure the LED isn't stuck on from a reset
   applyBrightness();
   lastInteractMs = millis();
   statsLoad();
@@ -986,8 +1291,8 @@ void setup() {
 }
 
 void loop() {
-  M5.update();
-  M5.Beep.update();
+  halUpdate();
+  halBeepUpdate();
   t++;
   uint32_t now = millis();
 
@@ -1001,11 +1306,13 @@ void loop() {
 
   if ((int32_t)(now - oneShotUntil) >= 0) activeState = baseState;
 
-  // LED: pulse on attention, otherwise off
+  // LED: pulse on attention, otherwise off. halLedSet dispatches to the
+  // StickC red GPIO or the Cardputer NeoPixel; both clear on (0,0,0).
   if (activeState == P_ATTENTION && settings().led) {
-    digitalWrite(LED_PIN, (now / 400) % 2 ? LOW : HIGH);
+    bool on = (now / 400) % 2;
+    halLedSet(on ? 180 : 0, on ? 40 : 0, 0);   // red-orange pulse
   } else {
-    digitalWrite(LED_PIN, HIGH);
+    halLedSet(0, 0, 0);
   }
 
   // shake → dizzy + force scenario advance
@@ -1027,11 +1334,11 @@ void loop() {
     if (tama.promptId[0]) {
       promptArrivedMs = millis();
       wake();
-      beep(1200, 80);   // alert chirp
+      sfxAlert();       // prompt arrived
       // Jump to the approval screen no matter what was open — drawApproval
       // only runs from drawHUD which only runs in DISP_NORMAL.
       displayMode = DISP_NORMAL;
-      menuOpen = settingsOpen = resetOpen = false;
+      menuOpen = settingsOpen = resetOpen = petPickerOpen = false;
       applyDisplayMode();
       characterInvalidate();
       if (buddyMode) buddyInvalidate();
@@ -1043,28 +1350,29 @@ void loop() {
   // Button-press wake. Track which button woke the screen so its full
   // press cycle (including long-press) is swallowed — you don't want
   // BtnA-to-wake to also cycle displayMode or open the menu.
-  if (M5.BtnA.isPressed() || M5.BtnB.isPressed()) {
+  if (halBtnA().isPressed() || halBtnB().isPressed()) {
     if (screenOff) {
-      if (M5.BtnA.isPressed()) swallowBtnA = true;
-      if (M5.BtnB.isPressed()) swallowBtnB = true;
+      if (halBtnA().isPressed()) swallowBtnA = true;
+      if (halBtnB().isPressed()) swallowBtnB = true;
     }
     wake();
   }
 
   // AXP power button (left side): short-press toggles screen off.
   // Long-press (6s) still powers off the device via AXP hardware.
-  if (M5.Axp.GetBtnPress() == 0x02) {
+  // No-op on Cardputer for now — halPowerBtnPress() always returns 0.
+  if (halPowerBtnPress() == 0x02) {
     if (screenOff) {
       wake();
     } else {
-      M5.Axp.SetLDO2(false);
+      halScreenPower(false);
       screenOff = true;
     }
   }
 
-  if (M5.BtnA.pressedFor(600) && !btnALong && !swallowBtnA) {
+  if (halBtnA().pressedFor(600) && !btnALong && !swallowBtnA) {
     btnALong = true;
-    beep(800, 60);
+    sfxMenu();
     if (resetOpen) { resetOpen = false; }
     else if (settingsOpen) { settingsOpen = false; characterInvalidate(); }
     else {
@@ -1074,8 +1382,14 @@ void loop() {
     }
     Serial.println(menuOpen ? "menu open" : "menu close");
   }
-  if (M5.BtnA.wasReleased()) {
+  if (halBtnA().wasReleased()) {
     if (!btnALong && !swallowBtnA) {
+      // On Cardputer, HalKey::Approve (also wired to Enter) handles all
+      // modal confirmations. BtnA wasReleased fires BtnA in *parallel*
+      // with the Approve event, so we skip the modal branches here to
+      // avoid double-firing (Enter would first cycle the highlight, then
+      // confirm the wrong row). Prompts and home-screen cycling keep the
+      // BtnA path since they don't overlap with Approve's targets.
       if (inPrompt) {
         char cmd[96];
         snprintf(cmd, sizeof(cmd), "{\"cmd\":\"permission\",\"id\":\"%s\",\"decision\":\"once\"}", tama.promptId);
@@ -1083,20 +1397,22 @@ void loop() {
         responseSent = true;
         uint32_t tookS = (millis() - promptArrivedMs) / 1000;
         statsOnApproval(tookS);
-        beep(2400, 60);
+        sfxApprove();
         if (tookS < 5) triggerOneShot(P_HEART, 2000);
+#ifndef CARDPUTER_ADV
       } else if (resetOpen) {
-        beep(1800, 30);
+        sfxNav();
         resetSel = (resetSel + 1) % RESET_N;
         resetConfirmIdx = 0xFF;
       } else if (settingsOpen) {
-        beep(1800, 30);
+        sfxNav();
         settingsSel = (settingsSel + 1) % SETTINGS_N;
       } else if (menuOpen) {
-        beep(1800, 30);
+        sfxNav();
         menuSel = (menuSel + 1) % MENU_N;
-      } else {
-        beep(1800, 30);
+#endif
+      } else if (!menuOpen && !settingsOpen && !resetOpen) {
+        sfxNav();
         displayMode = (displayMode + 1) % DISP_COUNT;
         applyDisplayMode();
       }
@@ -1106,7 +1422,7 @@ void loop() {
   }
 
   // BtnB: pet → heart
-  if (M5.BtnB.wasPressed()) {
+  if (halBtnB().wasPressed()) {
     if (swallowBtnB) { swallowBtnB = false; }
     else
     if (inPrompt) {
@@ -1115,26 +1431,150 @@ void loop() {
       sendCmd(cmd);
       responseSent = true;
       statsOnDenial();
-      beep(600, 60);
+      sfxDeny();
+#ifndef CARDPUTER_ADV
     } else if (resetOpen) {
-      beep(2400, 30);
+      sfxConfirm();
       applyReset(resetSel);
     } else if (settingsOpen) {
-      beep(2400, 30);
+      sfxConfirm();
       applySetting(settingsSel);
     } else if (menuOpen) {
-      beep(2400, 30);
+      sfxConfirm();
       menuConfirm();
-    } else if (displayMode == DISP_INFO) {
-      beep(2400, 30);
+#endif
+    } else if (!menuOpen && !settingsOpen && !resetOpen && displayMode == DISP_INFO) {
+      sfxNav();
       infoPage = (infoPage + 1) % INFO_PAGES;
-    } else if (displayMode == DISP_PET) {
-      beep(2400, 30);
+    } else if (!menuOpen && !settingsOpen && !resetOpen && displayMode == DISP_PET) {
+      sfxNav();
       petPage = (petPage + 1) % PET_PAGES;
       applyDisplayMode();
-    } else {
-      beep(2400, 30);
+    } else if (!menuOpen && !settingsOpen && !resetOpen) {
+      sfxNav();
       msgScroll = (msgScroll >= 30) ? 0 : msgScroll + 1;
+    }
+  }
+
+  // Keyboard shortcuts (Cardputer). halPollKey() returns None on StickC,
+  // so this loop is a no-op there. Up/Down navigate within whichever menu
+  // is open; Left/Right flip pages in INFO/PET modes; Y/N answer pending
+  // prompts directly; M opens the menu; G toggles demo mode. The Cardputer
+  // has a hardware power slide switch, so no software power key.
+  while (true) {
+    HalKey k = halPollKey();
+    if (k == HalKey::None) break;
+    wake();
+
+    // Re-evaluate inPrompt here: Enter fires both BtnA (which approves
+    // above) and HalKey::Approve (this loop). If we trusted the outer
+    // snapshot, a single Enter would approve twice in one frame.
+    bool promptLive = tama.promptId[0] && !responseSent;
+
+    // Pending approval overrides everything else — Y/N answer directly.
+    if (promptLive) {
+      if (k == HalKey::Approve) {
+        char cmd[96];
+        snprintf(cmd, sizeof(cmd), "{\"cmd\":\"permission\",\"id\":\"%s\",\"decision\":\"once\"}", tama.promptId);
+        sendCmd(cmd);
+        responseSent = true;
+        uint32_t tookS = (millis() - promptArrivedMs) / 1000;
+        statsOnApproval(tookS);
+        sfxApprove();
+        if (tookS < 5) triggerOneShot(P_HEART, 2000);
+      } else if (k == HalKey::Deny) {
+        char cmd[96];
+        snprintf(cmd, sizeof(cmd), "{\"cmd\":\"permission\",\"id\":\"%s\",\"decision\":\"deny\"}", tama.promptId);
+        sendCmd(cmd);
+        responseSent = true;
+        statsOnDenial();
+        sfxDeny();
+      }
+      continue;
+    }
+
+    // Modal menus — Up/Down move highlight without wrapping through all
+    // items like BtnA does; Approve (Y or Enter-via-BtnA analogue) picks
+    // the current row by invoking the same apply* functions BtnB triggers.
+    // Any time Approve/Back is consumed by a modal, suppress the matching
+    // button's next release. Enter/Del are wired to both BtnA/B *and*
+    // HalKey events; without this the release fires BtnA.wasReleased on
+    // the next frame and triggers home-screen displayMode cycling.
+    auto consumedEnter = [&]() { halBtnA().suppressPending(); };
+    auto consumedDel   = [&]() { halBtnB().suppressPending(); };
+
+    // Pet picker overrides the modal checks below: the picker isn't a
+    // modal that covers the canvas, so we drive its arrow-key behavior
+    // here before falling into the main-menu branches.
+    if (petPickerOpen) {
+      if      (k == HalKey::Left)    { prevPet(); sfxNav(); }
+      else if (k == HalKey::Right)   { nextPet(); sfxNav(); }
+      else if (k == HalKey::Approve
+            || k == HalKey::Back) {
+        // "Saved" feedback: rising 3-note fanfare + P_HEART one-shot so
+        // the pet visibly thanks the user. The index is already
+        // persisted by nextPet/prevPet — this is just the affordance.
+        sfxSave();
+        triggerOneShot(P_HEART, 1500);
+        petPickerOpen = false;
+        characterInvalidate();
+        if (buddyMode) buddyInvalidate();
+        if (k == HalKey::Approve) consumedEnter(); else consumedDel();
+      }
+      continue;
+    }
+
+    if (resetOpen) {
+      if      (k == HalKey::Up)      { resetSel = (resetSel + RESET_N - 1) % RESET_N; sfxNav(); resetConfirmIdx = 0xFF; }
+      else if (k == HalKey::Down)    { resetSel = (resetSel + 1) % RESET_N;           sfxNav(); resetConfirmIdx = 0xFF; }
+      else if (k == HalKey::Approve) { sfxConfirm(); applyReset(resetSel); consumedEnter(); }
+      else if (k == HalKey::Back)    { sfxBack(); resetOpen = false; consumedDel(); }
+      continue;
+    }
+    if (settingsOpen) {
+      if      (k == HalKey::Up)      { settingsSel = (settingsSel + SETTINGS_N - 1) % SETTINGS_N; sfxNav(); }
+      else if (k == HalKey::Down)    { settingsSel = (settingsSel + 1) % SETTINGS_N;              sfxNav(); }
+      else if (k == HalKey::Approve) { sfxConfirm(); applySetting(settingsSel); consumedEnter(); }
+      else if (k == HalKey::Back)    { sfxBack(); settingsOpen = false; characterInvalidate(); consumedDel(); }
+      continue;
+    }
+    if (menuOpen) {
+      if      (k == HalKey::Up)      { menuSel = (menuSel + MENU_N - 1) % MENU_N; sfxNav(); }
+      else if (k == HalKey::Down)    { menuSel = (menuSel + 1) % MENU_N;          sfxNav(); }
+      else if (k == HalKey::Approve) { sfxConfirm(); menuConfirm(); consumedEnter(); }
+      else if (k == HalKey::Back)    { sfxBack(); menuOpen = false; characterInvalidate(); consumedDel(); }
+      continue;
+    }
+
+    // Idle home screen.
+    switch (k) {
+      case HalKey::Menu:
+        menuOpen = true; menuSel = 0;
+        sfxMenu();
+        break;
+      case HalKey::Demo:
+        dataSetDemo(!dataDemo());
+        sfxConfirm();
+        break;
+      case HalKey::Left:
+        if      (displayMode == DISP_INFO) infoPage = (infoPage + INFO_PAGES - 1) % INFO_PAGES;
+        else if (displayMode == DISP_PET)  petPage  = (petPage  + PET_PAGES  - 1) % PET_PAGES;
+        sfxNav();
+        break;
+      case HalKey::Right:
+        if      (displayMode == DISP_INFO) infoPage = (infoPage + 1) % INFO_PAGES;
+        else if (displayMode == DISP_PET)  { petPage = (petPage + 1) % PET_PAGES; applyDisplayMode(); }
+        sfxNav();
+        break;
+      case HalKey::Up:
+        msgScroll = (msgScroll >= 30) ? 30 : msgScroll + 1;
+        sfxNav();
+        break;
+      case HalKey::Down:
+        msgScroll = msgScroll == 0 ? 0 : msgScroll - 1;
+        sfxNav();
+        break;
+      default: break;
     }
   }
 
@@ -1165,7 +1605,10 @@ void loop() {
     wasClocking = clocking;
     wasLandscape = landscapeClock;
   }
-  if (clocking) {
+  // Clock-mood picker overwrites activeState unconditionally, which also
+  // silently wipes one-shots (shake→dizzy, level-up→celebrate, etc.). Skip
+  // it while a one-shot is live so those animations play out first.
+  if (clocking && (int32_t)(now - oneShotUntil) >= 0) {
     uint8_t dow = clockDow();
     bool weekend = (dow == 0 || dow == 6);
     bool friday  = (dow == 5);
@@ -1182,12 +1625,20 @@ void loop() {
 
   static uint32_t lastPasskey = 0;
   uint32_t pk = blePasskey();
-  if (pk && !lastPasskey) { wake(); beep(1800, 60); }
+  if (pk && !lastPasskey) { wake(); sfxAlert(); }
   lastPasskey = pk;
 
-  if (napping || screenOff || landscapeClock) {
-    // skip sprite render — face-down, powered off, or landscape clock
-    // (which draws direct-to-LCD below)
+  // On Cardputer both INFO and PET pages claim the full canvas (no pet
+  // underneath), so skip the pet tick there to avoid drawing pixels that
+  // drawInfo/drawPet will immediately wipe. Portrait StickC still renders
+  // the peek pet above both panels since y=0..70 is the pet strip there.
+  bool suppressPet = napping || screenOff || landscapeClock;
+#ifdef CARDPUTER_ADV
+  suppressPet = suppressPet || displayMode == DISP_INFO || displayMode == DISP_PET;
+#endif
+  if (suppressPet) {
+    // skip sprite render — face-down, powered off, landscape clock, or
+    // full-screen info (Cardputer).
   } else if (buddyMode) {
     buddyTick(activeState);
   } else if (characterLoaded()) {
@@ -1222,6 +1673,7 @@ void loop() {
     else if (clocking) drawClock();
     else if (displayMode == DISP_INFO) drawInfo();
     else if (displayMode == DISP_PET) drawPet();
+    else if (petPickerOpen) drawPetPicker();   // thin hint bar + live pet above
     else if (settings().hud) drawHUD();
     if (resetOpen) drawReset();
     else if (settingsOpen) drawSettings();
@@ -1243,7 +1695,7 @@ void loop() {
   if (!napping && faceDownFrames >= 15) {
     napping = true;
     napStartMs = now;
-    M5.Axp.ScreenBreath(8);
+    halBrightness(8);
     dimmed = true;
   } else if (napping && faceDownFrames <= -8) {
     napping = false;
@@ -1257,7 +1709,7 @@ void loop() {
   // No auto-off on USB power — clock face wants to stay visible while charging.
   if (!screenOff && !inPrompt && !_onUsb
       && millis() - lastInteractMs > SCREEN_OFF_MS) {
-    M5.Axp.SetLDO2(false);
+    halScreenPower(false);
     screenOff = true;
   }
 

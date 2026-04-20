@@ -1,5 +1,5 @@
 #include "character.h"
-#include <M5StickCPlus.h>
+#include "hal.h"
 #include <LittleFS.h>
 #include <AnimatedGIF.h>
 #include <ArduinoJson.h>
@@ -37,10 +37,18 @@ static uint8_t curState = 0xFF;
 static AnimatedGIF gif;
 static File        gifFile;
 static int         gifX = 0, gifY = 0, gifW = 0, gifH = 0;
-// Peek mode pins the GIF bottom to the info-panel top (y=70) so the pet
-// sits on the panel edge regardless of canvas height. Home mode centers
-// in the upper 140px. No padding assumed in the source art.
-static const int   PEEK_TOP = 70;
+// Peek mode pins the GIF bottom to the info-panel top so the pet sits on
+// the panel edge regardless of canvas height. Home mode centers in the
+// upper portion of the sprite. No padding assumed in the source art.
+// Landscape packs both zones tighter so info/pet pages have enough room
+// for their content under the pet strip.
+#ifdef CARDPUTER_ADV
+static const int   PEEK_TOP             = 40;
+static const int   CHARACTER_HOME_ZONE  = 80;
+#else
+static const int   PEEK_TOP             = 70;
+static const int   CHARACTER_HOME_ZONE  = 140;
+#endif
 static bool        peekMode = false;
 // Draw target — defaults to the sprite; characterRenderTo() retargets to
 // M5.Lcd for the landscape clock (both inherit TFT_eSPI).
@@ -51,7 +59,7 @@ static void gifPlace() {
   int outW = peekMode ? gifW / 2 : gifW;
   int outH = peekMode ? gifH / 2 : gifH;
   gifX = (spr.width() - outW) / 2;
-  gifY = peekMode ? (PEEK_TOP - outH) / 2 : (140 - outH) / 2;
+  gifY = peekMode ? (PEEK_TOP - outH) / 2 : (CHARACTER_HOME_ZONE - outH) / 2;
 }
 static uint32_t    nextFrameAt = 0;
 static uint32_t    animPauseUntil = 0;

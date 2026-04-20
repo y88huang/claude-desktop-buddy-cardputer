@@ -1,6 +1,6 @@
 #include "buddy.h"
 #include "buddy_common.h"
-#include <M5StickCPlus.h>
+#include "hal.h"
 #include <string.h>
 
 extern TFT_eSprite spr;
@@ -9,8 +9,17 @@ extern TFT_eSprite spr;
 enum { B_SLEEP, B_IDLE, B_BUSY, B_ATTENTION, B_CELEBRATE, B_DIZZY, B_HEART };
 
 // ──────────────── shared geometry ────────────────
+// Horizontal center / canvas width track the sprite size, which differs
+// between portrait (StickC 135-wide) and landscape (Cardputer 240-wide).
+// Vertical baseline stays at 30 — landscape just gets more breathing room
+// under the pet before the HUD starts.
+#ifdef CARDPUTER_ADV
+const int BUDDY_X_CENTER = 120;
+const int BUDDY_CANVAS_W = 240;
+#else
 const int BUDDY_X_CENTER = 67;
 const int BUDDY_CANVAS_W = 135;
+#endif
 const int BUDDY_Y_BASE   = 30;
 const int BUDDY_Y_OVERLAY = 6;
 const int BUDDY_CHAR_W   = 6;
@@ -87,13 +96,15 @@ extern const Species ROBOT_SPECIES;
 extern const Species RABBIT_SPECIES;
 extern const Species MUSHROOM_SPECIES;
 extern const Species CHONK_SPECIES;
+extern const Species DOGE_SPECIES;
+extern const Species LLAMA_SPECIES;
 
 static const Species* SPECIES_TABLE[] = {
   &CAPYBARA_SPECIES, &DUCK_SPECIES, &GOOSE_SPECIES, &BLOB_SPECIES,
   &CAT_SPECIES, &DRAGON_SPECIES, &OCTOPUS_SPECIES, &OWL_SPECIES,
   &PENGUIN_SPECIES, &TURTLE_SPECIES, &SNAIL_SPECIES, &GHOST_SPECIES,
   &AXOLOTL_SPECIES, &CACTUS_SPECIES, &ROBOT_SPECIES, &RABBIT_SPECIES,
-  &MUSHROOM_SPECIES, &CHONK_SPECIES,
+  &MUSHROOM_SPECIES, &CHONK_SPECIES, &DOGE_SPECIES, &LLAMA_SPECIES,
 };
 static const uint8_t N_SPECIES = sizeof(SPECIES_TABLE) / sizeof(SPECIES_TABLE[0]);
 static uint8_t currentSpeciesIdx = 0;
