@@ -1,10 +1,13 @@
 # claude-desktop-buddy-cardputer
 
-A port of [anthropics/claude-desktop-buddy](https://github.com/anthropics/claude-desktop-buddy) to the **M5Stack Cardputer ADV** (ESP32-S3, 240×135 landscape TFT, full QWERTY keyboard, RGB NeoPixel, BMI270 IMU, I²S speaker, hardware power slide switch).
+> **Physical desk pet for Claude Code / Cowork** — runs on the **M5Stack Cardputer ADV** (ESP32-S3). Approve permission prompts with `Y`/`N` on a real keyboard, watch your pet react to what Claude is doing, get a Mario 1-UP in your ear when an approval is waiting, and flip the device face-down to make it nap.
 
-The upstream firmware targets the M5StickC Plus — portrait 135×240 display, AXP192 power controller, two-button input. This fork swaps those dependencies for the Cardputer ADV's peripherals and redesigns the UI for landscape + keyboard input. The BLE bridge, stats, NVS persistence, GIF character pipeline, and all 18 original ASCII species work unchanged.
+[![PlatformIO](https://img.shields.io/badge/built_with-PlatformIO-orange.svg)](https://platformio.org/)
+[![Target](https://img.shields.io/badge/target-ESP32--S3-blue.svg)](https://www.espressif.com/en/products/socs/esp32-s3)
+[![Hardware](https://img.shields.io/badge/hardware-M5Stack_Cardputer_ADV-lightblue.svg)](https://shop.m5stack.com/products/m5stack-cardputer-adv)
+[![Fork of](https://img.shields.io/badge/fork_of-anthropics%2Fclaude--desktop--buddy-purple)](https://github.com/anthropics/claude-desktop-buddy)
 
-> **Building your own device?** You still don't need any of the code here — the wire protocol reference in **[REFERENCE.md](REFERENCE.md)** is untouched from upstream.
+A port of [anthropics/claude-desktop-buddy](https://github.com/anthropics/claude-desktop-buddy) from the M5StickC Plus to the Cardputer ADV. The BLE bridge, stats, NVS persistence, GIF character pipeline, and all 18 original ASCII species work unchanged; this fork adds a landscape UI, full-keyboard input, 8-bit sound library, a live pet picker, two new species (`doge`, `llama`), and a handful of UX fixes.
 
 ## What it does
 
