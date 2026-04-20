@@ -934,6 +934,53 @@ static uint8_t wrapInto(const char* in, char out[][24], uint8_t maxRows, uint8_t
 
 static void drawApproval() {
   const Palette& p = characterPalette();
+  uint32_t waited = (millis() - promptArrivedMs) / 1000;
+
+#ifdef CARDPUTER_ADV
+  // Full-screen landscape approval — pet is suppressed in prompt mode,
+  // so we claim the whole 240x135 canvas. Tool name gets a big size-2
+  // centered line; the hint wraps at 38 chars (240 / 6).
+  spr.fillSprite(p.bg);
+  spr.setTextSize(1);
+  spr.setTextColor(waited >= 10 ? HOT : p.textDim, p.bg);
+  spr.setCursor(4, 6);
+  spr.printf("approve?  %lus", (unsigned long)waited);
+
+  int toolLen = strlen(tama.promptTool);
+  spr.setTextColor(p.text, p.bg);
+  spr.setTextSize(toolLen <= 20 ? 2 : 1);
+  spr.setTextDatum(MC_DATUM);
+  spr.drawString(tama.promptTool, CX, 40);
+  spr.setTextDatum(TL_DATUM);
+  spr.setTextSize(1);
+
+  spr.setTextColor(p.textDim, p.bg);
+  const int WRAP = 38;
+  int hlen = strlen(tama.promptHint);
+  spr.setCursor(4, 72);
+  if (hlen <= WRAP) {
+    spr.print(tama.promptHint);
+  } else {
+    char buf[WRAP + 1];
+    memcpy(buf, tama.promptHint, WRAP); buf[WRAP] = 0;
+    spr.print(buf);
+    spr.setCursor(4, 84);
+    spr.printf("%.38s", tama.promptHint + WRAP);
+  }
+
+  if (responseSent) {
+    spr.setTextColor(p.textDim, p.bg);
+    spr.setCursor(4, H - 14);
+    spr.print("sent...");
+  } else {
+    spr.setTextColor(GREEN, p.bg);
+    spr.setCursor(4, H - 14);
+    spr.print("Y: approve");
+    spr.setTextColor(HOT, p.bg);
+    spr.setCursor(W - 52, H - 14);
+    spr.print("N: deny");
+  }
+#else
   const int AREA = 78;
   spr.fillRect(0, H - AREA, W, AREA, p.bg);
   spr.drawFastHLine(0, H - AREA, W, p.textDim);
@@ -941,7 +988,6 @@ static void drawApproval() {
   spr.setTextSize(1);
   spr.setTextColor(p.textDim, p.bg);
   spr.setCursor(4, H - AREA + 4);
-  uint32_t waited = (millis() - promptArrivedMs) / 1000;
   if (waited >= 10) spr.setTextColor(HOT, p.bg);
   spr.printf("approve? %lus", (unsigned long)waited);
 
@@ -975,6 +1021,7 @@ static void drawApproval() {
     spr.setCursor(W - 48, H - 12);
     spr.print("B: deny");
   }
+#endif
 }
 
 static void tinyHeart(int x, int y, bool filled, uint16_t col) {
@@ -1630,11 +1677,15 @@ void loop() {
 
   // On Cardputer both INFO and PET pages claim the full canvas (no pet
   // underneath), so skip the pet tick there to avoid drawing pixels that
-  // drawInfo/drawPet will immediately wipe. Portrait StickC still renders
-  // the peek pet above both panels since y=0..70 is the pet strip there.
+  // drawInfo/drawPet will immediately wipe. Same deal for approval
+  // prompts — the landscape prompt is full-screen. Portrait StickC still
+  // renders the peek pet above the info/pet panels and the partial
+  // bottom-strip approval.
   bool suppressPet = napping || screenOff || landscapeClock;
 #ifdef CARDPUTER_ADV
-  suppressPet = suppressPet || displayMode == DISP_INFO || displayMode == DISP_PET;
+  suppressPet = suppressPet || displayMode == DISP_INFO
+                            || displayMode == DISP_PET
+                            || inPrompt;
 #endif
   if (suppressPet) {
     // skip sprite render — face-down, powered off, landscape clock, or
