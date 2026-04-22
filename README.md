@@ -44,6 +44,23 @@ Original M5StickC Plus firmware path is preserved — the HAL passes through to 
 
 ## Flashing
 
+### Pre-built release (no toolchain)
+
+Grab the latest merged `.bin` from the [**Releases page**](https://github.com/y88huang/claude-desktop-buddy-cardputer/releases/latest) and flash it with either:
+
+**M5Burner** — top-right **Open Custom Firmware** → pick `claude-buddy-cardputer-*.bin` → select your USB serial port → baud `921600` → **Burn**.
+
+**esptool** (CLI):
+
+```bash
+esptool --chip esp32s3 --port /dev/tty.usbmodem* --baud 921600 \
+  write_flash 0x0 claude-buddy-cardputer-v1.0.0.bin
+```
+
+If you're coming from a previously-flashed device, run `esptool --chip esp32s3 erase_flash` first.
+
+### From source
+
 Install [PlatformIO Core](https://docs.platformio.org/en/latest/core/installation/), then:
 
 ```bash
@@ -54,7 +71,9 @@ pio run -e cardputer-adv -t upload
 pio run -e m5stickc-plus -t upload
 ```
 
-Wipe a previously-flashed device first with `pio run -e cardputer-adv -t erase`. Factory reset is also available from the device: Menu → settings → reset → factory reset → tap twice.
+Every build also drops a merged `release/cardputer-adv-merged.bin` you can hand off to M5Burner.
+
+Wipe a previously-flashed device first with `pio run -e cardputer-adv -t erase`. Factory reset from the device itself: Menu → settings → reset → factory reset → tap twice.
 
 ## Pairing
 
