@@ -3,3 +3,4 @@
 .DS_Store
 data/
 get-platformio.py
+release/
