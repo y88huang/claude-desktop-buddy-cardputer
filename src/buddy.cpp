@@ -70,7 +70,7 @@ void buddyPrintSprite(const char* const* lines, uint8_t nLines, int yOffset, uin
 }
 
 // Species pass 1× coords (relative to BUDDY_X_CENTER / BUDDY_Y_OVERLAY);
-// transform here so all 18 species files stay scale-agnostic.
+// transform here so all species files stay scale-agnostic.
 void buddySetCursor(int x, int y) {
   _tgt->setCursor(BUDDY_X_CENTER + (x - BUDDY_X_CENTER) * _scale, y * _scale);
 }

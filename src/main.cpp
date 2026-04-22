@@ -221,7 +221,7 @@ void applyDisplayMode() {
 
 // "pet" at index 1 cycles the active species inline (like "demo" toggles);
 // menuConfirm() keeps the menu open for this item so the user can mash it
-// to flip through all ~19 species without reopening the menu each time.
+// to flip through all 20+ species without reopening the menu each time.
 const char* menuItems[] = { "settings", "pet", "turn off", "help", "about", "demo", "close" };
 const uint8_t MENU_N = 7;
 
@@ -729,7 +729,7 @@ void drawInfo() {
     ln("on a pending prompt.");
     y += 6;
     spr.setTextColor(p.textDim, p.bg);
-    ln("18 species. Menu > pet to cycle.");
+    ln("20 species. Menu > pet to cycle.");
 #else
     ln("I watch your Claude");
     ln("desktop sessions.");
@@ -745,7 +745,7 @@ void drawInfo() {
     ln("to approve from here.");
     y += 6;
     spr.setTextColor(p.textDim, p.bg);
-    ln("18 species. Settings");
+    ln("20 species. Settings");
     ln("> ascii pet to cycle.");
 #endif
 
